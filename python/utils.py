@@ -8,6 +8,8 @@ import numpy as np
 import scipy.linalg
 import scipy.optimize
 
+from numba import jit
+
 
 class RecursiveLeastSquaresEstimator(object):
 
@@ -253,6 +255,40 @@ def augment_system(A_z, A_d, B_z, B_d):
 def quad_form(Q, x):
     return x.dot(Q.dot(x))
 
+def psd_project(M, mu, L):
+    assert mu < L
+    evals, evecs = np.linalg.eigh(M)
+    evals[evals < mu] = mu
+    evals[evals > L] = L
+    return evecs @ np.diag(evals) @ evecs.T
+
+@jit(nopython=True)
+def svec(M):
+    diag = np.diag(M)
+    off_diag = np.sqrt(2) * extract_upper_triangular(M)
+    return np.hstack((diag, off_diag))
+
+def smat(v):
+    n = int((np.sqrt(1 + 8 * v.shape[0]) - 1) / 2)
+    assert n * (n + 1) == 2 * v.shape[0]
+    V = np.zeros((n, n))
+    off_diag = v[n:] / np.sqrt(2.0)
+    V[np.triu_indices(V.shape[0], k = 1)] = off_diag
+    V += V.T
+    V[np.diag_indices(V.shape[0])] = v[:n]
+    return V
+
+@jit(nopython=True)
+def extract_upper_triangular(M):
+    n, _ = M.shape
+    d = n * (n - 1) // 2
+    ret = np.zeros((d,), dtype=M.dtype)
+    count = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            ret[count] = M[i, j]
+            count += 1
+    return ret
 
 def project_ball(M, Ahat, eps_A):
     """Project M onto the set { A : ||A - Ahat||_op <= eps_A }
@@ -348,6 +384,9 @@ def project_weighted_ball(M, theta_hat, cov, eps):
     assert np.trace(theta_star.dot(cov).dot(theta_star.T)) <= eps + TOL
 
     return theta_star
+
+def min_eigvalsh(M):
+    return np.min(np.linalg.eigvalsh(M))
 
 def _main():
     # for debugging

@@ -199,10 +199,10 @@ def sls_synth(Q, R, Ahat, Bhat, eps_A, eps_B, T, gamma, alpha, logger=None):
     R_sqrt = utils.psd_sqrt(R)
 
     # Phi_x = \sum_{k=1}^{T} Phi_x[k] z^{-k}
-    Phi_x = cvx.Variable(T*n, n, name="Phi_x")
+    Phi_x = cvx.Variable((T*n, n), name="Phi_x")
 
     # Phi_u = \sum_{k=1}^{T} Phi_u[k] z^{-k}
-    Phi_u = cvx.Variable(T*p, n, name="Phi_u")
+    Phi_u = cvx.Variable((T*p, n), name="Phi_u")
 
     # htwo_cost
     htwo_cost = cvx.Variable(name="htwo_cost")
@@ -275,7 +275,7 @@ def sls_synth(Q, R, Ahat, Bhat, eps_A, eps_B, T, gamma, alpha, logger=None):
         [[np.zeros((n, n)), np.zeros((n, p))]] +
         [[mult_x*Phi_x[n*k:n*(k+1), :].T, mult_u*Phi_u[p*k:p*(k+1), :].T] for k in range(T)])
 
-    Q = cvx.Semidef(n*(T+1), name="Q")
+    Q = cvx.Variable((n*(T+1), n*(T+1)), name="Q", PSD=True)
 
     # Constraint (5.44)
 
@@ -293,7 +293,7 @@ def sls_synth(Q, R, Ahat, Bhat, eps_A, eps_B, T, gamma, alpha, logger=None):
     constr.append(
         cvx.bmat([
             [Q, Hbar],
-            [Hbar.T, np.eye(n+p)]]) == cvx.Semidef(n*(T+1) + (n+p)))
+            [Hbar.T, np.eye(n+p)]]) == cvx.Variable((n*(T+1) + (n+p), n*(T+1) + (n+p)), PSD=True))
 
     prob = cvx.Problem(cvx.Minimize(htwo_cost), constr)
     prob.solve(solver=cvx.SCS)
@@ -323,11 +323,11 @@ def sls_common_lyapunov(A, B, Q, R, eps_A, eps_B, tau, logger=None):
         logger = logging.getLogger(__name__)
 
     d, p = B.shape
-    X = cvx.Symmetric(d)   # inverse Lyapunov function
-    Z = cvx.Variable(p, d) # -K*X
-    W_11 = cvx.Symmetric(d)
-    W_12 = cvx.Variable(d, p)
-    W_22 = cvx.Symmetric(p)
+    X = cvx.Variable((d, d), symmetric=True)   # inverse Lyapunov function
+    Z = cvx.Variable((p, d)) # -K*X
+    W_11 = cvx.Variable((d, d), symmetric=True)
+    W_12 = cvx.Variable((d, p))
+    W_22 = cvx.Variable((p, p), symmetric=True)
     alph = cvx.Variable()  # scalar for tuning the H_inf constraint
 
     constraints = []
@@ -337,7 +337,7 @@ def sls_common_lyapunov(A, B, Q, R, eps_A, eps_B, tau, logger=None):
             [X, X, Z.T],
             [X, W_11, W_12],
             [Z, W_12.T, W_22]])
-    constraints.append(mat1 == cvx.Semidef(2*d + p))
+    constraints.append(mat1 == cvx.Variable((2*d + p, 2*d + p), PSD=True))
 
     # H_infinity constraint
     mat2 = cvx.bmat([
@@ -345,7 +345,7 @@ def sls_common_lyapunov(A, B, Q, R, eps_A, eps_B, tau, logger=None):
             [(X*A.T+Z.T*B.T), X, eps_A*X, eps_B*Z.T],
             [np.zeros((d, d)), eps_A*X, alph*(tau**2)*np.eye(d), np.zeros((d, p))],
             [np.zeros((p, d)), eps_B*Z, np.zeros((p, d)), (1-alph)*(tau**2)*np.eye(p)]])
-    constraints.append(mat2 == cvx.Semidef(3*d + p))
+    constraints.append(mat2 == cvx.Variable((3*d + p, 3*d + p), PSD=True))
 
     # constrain alpha to be in [0,1]:
     constraints.append(alph >= 0)
