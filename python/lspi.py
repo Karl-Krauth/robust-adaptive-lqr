@@ -10,6 +10,7 @@ import scipy.linalg
 import math
 
 from adaptive import AdaptiveMethod
+from numba import jit
 
 
 class RankDegeneracyException(Exception):
@@ -17,9 +18,18 @@ class RankDegeneracyException(Exception):
         super().__init__(msg)
 
 
+@jit(nopython=True)
 def phi(x, u):
     z = np.hstack((x, u))
     return utils.svec(np.outer(z, z))
+
+
+@jit(nopython=True)
+def _fill_Psis(Phis, Psis, next_states, next_inputs, f):
+    T, _ = Phis.shape
+    for t in range(T):
+        Psis[t] = Phis[t] - phi(next_states[t], next_inputs[t]) + f
+
 
 class LSPIStrategy(AdaptiveMethod):
 
@@ -44,24 +54,58 @@ class LSPIStrategy(AdaptiveMethod):
 
         self._logger = logging.getLogger(__name__)
 
+        self._Phis = None
+        self._costs = None
+
     def _get_logger(self):
         return self._logger
 
     def _design_controller(self, states, inputs, transitions, rng):
-        _, n = states.shape
-        logger = self._get_logger()
-        logger.info("_design_controller(epoch={}): n_transitions={}".format(self._epoch_idx + 1, states.shape[0]))
+        T, n = states.shape
+        _, d = inputs.shape
 
-        for i in range(self._num_PI_iters):
-            #print(utils.spectral_radius(self._A_star + self._B_star @ self._Kt))
-            Qt = self._lstdq(states, inputs, transitions, self._Kt,
-                             self._mu, self._L)
+        lifted_dim = (n + d) * (n + d + 1) // 2
+
+        logger = self._get_logger()
+        logger.info("_design_controller(epoch={}): n_transitions={}".format(
+            self._epoch_idx + 1 if self._has_primed else 0,
+            states.shape[0]))
+
+        if self._Phis is None:
+            assert self._costs is None
+            self._Phis = np.zeros((states.shape[0], lifted_dim))
+            for i in range(states.shape[0]):
+                self._Phis[i] = phi(states[i], inputs[i])
+            self._costs = (np.diag((states @ self._Q) @ states.T) +
+                           np.diag((inputs @ self._R) @ inputs.T))
+        else:
+            assert self._costs is not None
+            base_idx = self._Phis.shape[0]
+            newPhis = np.zeros((states.shape[0] - base_idx, lifted_dim))
+            for i in range(newPhis.shape[0]):
+                newPhis[i] = phi(states[base_idx + i], inputs[base_idx + i])
+            newCosts = (np.diag((states[base_idx:] @ self._Q) @ states[base_idx:].T) +
+                        np.diag((inputs[base_idx:] @ self._R) @ inputs[base_idx:].T))
+            self._Phis = np.vstack((self._Phis, newPhis))
+            self._costs = np.hstack((self._costs, newCosts))
+
+        # TODO(stephentu):
+        # this is a hack
+        if T <= 2000:
+            num_iters = self._num_PI_iters
+        elif T <= 4000:
+            num_iters = self._num_PI_iters + 1
+        elif T <= 6000:
+            num_iters = self._num_PI_iters + 2
+        else:
+            num_iters = self._num_PI_iters + 3
+
+        logger.info("num_iters={}".format(num_iters))
+        for i in range(num_iters):
+            Qt = self._lstdq(self._Phis, transitions, self._costs, self._Kt,
+                             self._sigma_w, self._mu, self._L)
             Ktp1 = -scipy.linalg.solve(Qt[n:, n:], Qt[:n, n:].T, sym_pos=True)
-            #if utils.spectral_radius(self._A_star + self._B_star @ Ktp1) >= 1:
-            #    print(i)
-            #    break
             self._Kt = Ktp1
-        #print(self._Kt)
 
         rho_true = utils.spectral_radius(self._A_star + self._B_star @ self._Kt)
         logger.info("_design_controller(epoch={}): rho(A_* + B_* K)={}".format(
@@ -70,28 +114,25 @@ class LSPIStrategy(AdaptiveMethod):
         Jnom = utils.LQR_cost(self._A_star, self._B_star, self._Kt, self._Q, self._R, self._sigma_w)
         return (self._A_star, self._B_star, Jnom)
 
-    def _lstdq(self, states, inputs, transitions, Keval, mu, L):
-        T, n = states.shape
-        _, d = inputs.shape
-        lifted_dim = (n + d) * (n + d + 1) // 2
-        #costs = np.sum(states * (states @ self._Q), axis=1)
-        costs = (np.diag((states @ self._Q) @ states.T) +
-                 np.diag((inputs @ self._R) @ inputs.T))
+    def _lstdq(self, Phis, next_states, costs, Keval, sigma_w, mu, L):
+        _, n = next_states.shape
 
         I_K = np.vstack((np.eye(n), Keval))
-        f = (self._sigma_w ** 2) * utils.svec(I_K @ I_K.T)
-        Phis = np.zeros((T, lifted_dim))
-        diffs = np.zeros_like(Phis)
-        for t in range(T):
-            Phis[t] = phi(states[t], inputs[t])
-            diffs[t] = Phis[t] - phi(transitions[t], Keval @ transitions[t]) + f
-        Amat = Phis.T @ diffs
-        bmat = Phis.T @ costs
+        f = (sigma_w ** 2) * utils.svec(I_K.dot(I_K.T))
+
+        Psis = np.zeros_like(Phis)
+        next_inputs = next_states.dot(Keval.T)
+
+        _fill_Psis(Phis, Psis, next_states, next_inputs, f)
+
+        Amat = Phis.T.dot(Psis)
+        bmat = Phis.T.dot(costs)
+
         svals = scipy.linalg.svdvals(Amat)
         if min(svals) <= 1e-8:
             raise RankDegeneracyException(
                 "Amat is degenerate: s_min(Amat)={}".format(min(svals)))
-        qhat = np.linalg.lstsq(Amat, bmat, rcond=None)[0]
+        qhat = np.linalg.lstsq(Amat, bmat)[0]
         Qhat = utils.psd_project(utils.smat(qhat), mu, L)
         return Qhat
 
