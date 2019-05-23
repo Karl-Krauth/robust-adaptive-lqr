@@ -20,12 +20,12 @@ class RankDegeneracyException(Exception):
 
 @jit(nopython=True)
 def phi(x):
-    return np.outer(x, x).flatten()
+    return utils.svec(np.outer(x, x))
 
 @jit(nopython=True)
 def psi(x, u):
     z = np.hstack((x, u))
-    return np.outer(z, z).flatten()
+    return utils.svec(np.outer(z, z))
 
 class MFLQStrategy(AdaptiveMethod):
 
@@ -61,8 +61,8 @@ class MFLQStrategy(AdaptiveMethod):
         T, n = states.shape
         _, d = inputs.shape
 
-        phi_dim = n * n
-        psi_dim = (n + d) * (n + d)
+        phi_dim = n * (n + 1) // 2
+        psi_dim = (n + d) * (n + d + 1) // 2
 
         logger = self._get_logger()
         logger.info("_design_controller(epoch={}): n_transitions={}".format(
@@ -80,6 +80,7 @@ class MFLQStrategy(AdaptiveMethod):
             self._G_sum = np.zeros((n + d, n + d))
             for i in range(states.shape[0]):
                 self._Phis[i] = phi(states[i])
+                self._Phis_plus[i] = phi(transitions[i])
                 self._Psis[i] = psi(states[i], inputs[i])
             self._costs = (np.diag((states @ self._Q) @ states.T) +
                            np.diag((inputs @ self._R) @ inputs.T))
@@ -104,11 +105,6 @@ class MFLQStrategy(AdaptiveMethod):
             self._Psis = np.vstack((self._Psis, newPsis))
             self._costs = np.hstack((self._costs, newCosts))
 
-        print("phis shape", self._Phis.shape)
-        print("phis", np.linalg.matrix_rank(self._Phis))
-        
-        print("Psis shape", (self._Psis).shape)
-        print("Psis", np.linalg.matrix_rank(self._Psis))
         Gt = self._estimate_G(self._Phis, self._Phis_plus, self._Psis, self._costs,
                               self._sigma_w, n)
         self._G_sum += Gt
@@ -122,21 +118,21 @@ class MFLQStrategy(AdaptiveMethod):
         return (self._A_star, self._B_star, Jnom)
 
     def _estimate_G(self, Phis, Phis_plus, Psis, costs, sigma_w, n):
-        W = (np.eye(n) * sigma_w ** 2).flatten()
+        W = utils.svec(np.eye(n) * sigma_w ** 2)
         Amat = Phis.T @ (Phis - Phis_plus + W)
         bmat = Phis.T @ costs
         hhat = np.linalg.lstsq(Amat, bmat)[0]
-        Hhat_proj = utils.psd_project(utils.mat(hhat) - self._Q, 0, np.inf) + self._Q
-        hhat_proj = Hhat_proj.flatten()
+        Hhat_proj = utils.psd_project(utils.smat(hhat) - self._Q, 0, np.inf) + self._Q
+        hhat_proj = utils.svec(Hhat_proj)
 
         ghat = scipy.linalg.solve(Psis.T @ Psis, Psis.T @ (costs + (Phis_plus - W) @ hhat_proj), sym_pos=True)
         cost_block = np.block([[self._Q, np.zeros([self._Q.shape[0], self._R.shape[1]])],
                                [np.zeros([self._Q.shape[1], self._R.shape[0]]), self._R]])
-        Ghat = utils.psd_project(utils.mat(ghat) - cost_block, 0, np.inf) + cost_block
+        Ghat = utils.psd_project(utils.smat(ghat) - cost_block, 0, np.inf) + cost_block
         return Ghat
 
     def _should_terminate_epoch(self):
-        if self._iteration_within_epoch_idx >= self.epoch_length:
+        if self._iteration_within_epoch_idx >= self._epoch_length:
             return True
         else:
             return False
