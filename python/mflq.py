@@ -1,4 +1,4 @@
-"""lspi.py
+"""mflq.py
 
 """
 
@@ -20,14 +20,14 @@ class RankDegeneracyException(Exception):
 
 @jit(nopython=True)
 def phi(x):
-    return np.flatten(np.outer(x, x))
+    return np.outer(x, x).flatten()
 
 @jit(nopython=True)
 def psi(x, u):
     z = np.hstack((x, u))
-    return np.flatten(np.outer(z, z))
+    return np.outer(z, z).flatten()
 
-class LSPIStrategy(AdaptiveMethod):
+class MFLQStrategy(AdaptiveMethod):
 
     def __init__(self,
                  Q,
@@ -37,7 +37,7 @@ class LSPIStrategy(AdaptiveMethod):
                  sigma_w,
                  sigma_explore,
                  epoch_length,
-                 exploration_period
+                 exploration_period,
                  K_init):
         super().__init__(Q, R, A_star, B_star, sigma_w, None)
         self._sigma_explore = sigma_explore
@@ -52,6 +52,7 @@ class LSPIStrategy(AdaptiveMethod):
         self._Phis_plus = None
         self._Psis = None
         self._costs = None
+        self._G_sum = None
 
     def _get_logger(self):
         return self._logger
@@ -72,9 +73,11 @@ class LSPIStrategy(AdaptiveMethod):
             assert self._Phis_plus is None
             assert self._costs is None
             assert self._Psis is None
+            assert self._G_sum is None
             self._Phis = np.zeros((states.shape[0], phi_dim))
             self._Phis_plus = np.zeros((states.shape[0], phi_dim))
             self._Psis = np.zeros((states.shape[0], psi_dim))
+            self._G_sum = np.zeros((n + d, n + d))
             for i in range(states.shape[0]):
                 self._Phis[i] = phi(states[i])
                 self._Psis[i] = psi(states[i], inputs[i])
@@ -101,11 +104,15 @@ class LSPIStrategy(AdaptiveMethod):
             self._Psis = np.vstack((self._Psis, newPsis))
             self._costs = np.hstack((self._costs, newCosts))
 
-        logger.info("num_iters={}".format(num_iters))
+        print("phis shape", self._Phis.shape)
+        print("phis", np.linalg.matrix_rank(self._Phis))
+        
+        print("Psis shape", (self._Psis).shape)
+        print("Psis", np.linalg.matrix_rank(self._Psis))
         Gt = self._estimate_G(self._Phis, self._Phis_plus, self._Psis, self._costs,
                               self._sigma_w, n)
-        # TODO: still need to compute Q and take the min here
-        self._Kt = Ktp1
+        self._G_sum += Gt
+        self._Kt = -np.linalg.solve(self._G_sum[d:, d:], self._G_sum[d:, :n])
 
         rho_true = utils.spectral_radius(self._A_star + self._B_star @ self._Kt)
         logger.info("_design_controller(epoch={}): rho(A_* + B_* K)={}".format(
@@ -115,12 +122,12 @@ class LSPIStrategy(AdaptiveMethod):
         return (self._A_star, self._B_star, Jnom)
 
     def _estimate_G(self, Phis, Phis_plus, Psis, costs, sigma_w, n):
-        W = np.flatten(np.eye(n) * sigma_w ** 2)
+        W = (np.eye(n) * sigma_w ** 2).flatten()
         Amat = Phis.T @ (Phis - Phis_plus + W)
         bmat = Phis.T @ costs
         hhat = np.linalg.lstsq(Amat, bmat)[0]
         Hhat_proj = utils.psd_project(utils.mat(hhat) - self._Q, 0, np.inf) + self._Q
-        hhat_proj = np.flatten(Hhat_proj)
+        hhat_proj = Hhat_proj.flatten()
 
         ghat = scipy.linalg.solve(Psis.T @ Psis, Psis.T @ (costs + (Phis_plus - W) @ hhat_proj), sym_pos=True)
         cost_block = np.block([[self._Q, np.zeros([self._Q.shape[0], self._R.shape[1]])],

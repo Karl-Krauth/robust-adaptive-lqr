@@ -268,6 +268,11 @@ def svec(M):
     off_diag = np.sqrt(2) * extract_upper_triangular(M)
     return np.hstack((diag, off_diag))
 
+def mat(v):
+    n = int(np.sqrt(v.shape[0]))
+    assert n * n == v.shape[0]
+    return v.reshape([n, n])
+
 def smat(v):
     n = int((np.sqrt(1 + 8 * v.shape[0]) - 1) / 2)
     assert n * (n + 1) == 2 * v.shape[0]
